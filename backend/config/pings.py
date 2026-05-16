@@ -1,0 +1,115 @@
+# pylint: disable=broad-exception-caught
+"""
+Module Exposes a function to test if all API and SECURE KEYs are work
+"""
+
+import functools
+import logging
+import time
+
+import requests
+from supabase import create_client
+
+logger = logging.getLogger(__name__)
+
+
+def with_retries(retries: int = 5, initial_delay: float = 1.0):
+    """Decorator to retry a function with exponential backoff."""
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            last_exc = None
+            for attempt in range(retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exc = e
+                    if attempt < retries - 1:
+                        logger.warning(
+                            "Retry attempt failed",
+                            extra={
+                                "function_name": func.__name__,
+                                "attempt": attempt + 1,
+                                "max_retries": retries,
+                                "error": str(e),
+                                "retry_delay_seconds": delay,
+                            },
+                        )
+                        time.sleep(delay)
+                        delay = min(delay * 2, 16.0)
+            logger.error(
+                "Function failed after all retries",
+                extra={
+                    "function_name": func.__name__,
+                    "max_retries": retries,
+                    "final_error": str(last_exc),
+                },
+            )
+            return False
+
+        return wrapper
+
+    return decorator
+
+@with_retries(retries=5)
+def check_supabase_connection(supabase_url, supabase_anon_key) -> bool:
+    """To check if SUPABASE_URL and SUPABASE_ANON_KEY works"""
+    try:
+        headers = {
+            "apikey": supabase_anon_key,
+            "Authorization": f"Bearer {supabase_anon_key}",
+        }
+
+        r = requests.get(f"{supabase_url}/rest/v1/", headers=headers, timeout=5)
+
+        # 401 = key accepted but no resource (EXPECTED)
+        if r.status_code in (200, 401, 404):
+            logger.info(
+                "Supabase connection check passed",
+                extra={
+                    "status": "success",
+                    "http_status_code": r.status_code,
+                },
+            )
+            return True
+        raise RuntimeError(f"Unexpected status code: {r.status_code}")
+
+    except Exception as e:
+        logger.error(
+            "Supabase connection check failed",
+            extra={
+                "status": "failure",
+                "error": str(e),
+            },
+        )
+        raise
+
+
+@with_retries(retries=5)
+def check_supabase_service_key(supabase_url, service_key) -> bool:
+    """To check if SUPABASE_SERVICE_KEY works"""
+    try:
+        supabase = create_client(supabase_url, service_key)
+
+        # Service key must bypass RLS
+        # This query should succeed even if RLS is enabled
+        supabase.table("users").select("id").limit(1).execute()
+        logger.info(
+            "Supabase service key check passed",
+            extra={
+                "status": "success",
+            },
+        )
+        return True
+
+    except Exception as e:
+        logger.error(
+            "Supabase service key check failed",
+            extra={
+                "status": "failure",
+                "error": str(e),
+            },
+        )
+        raise
